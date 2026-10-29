@@ -1,0 +1,11 @@
+{
+  "name": "monsgeek-claude-pulse",
+  "owner": { "name": "Alexander Marinov" },
+  "plugins": [
+    {
+      "name": "monsgeek-claude-pulse",
+      "source": "./",
+      "description": "Keyboard RGB feedback for Claude Code on MonsGeek/Akko keyboards"
+    }
+  ]
+}

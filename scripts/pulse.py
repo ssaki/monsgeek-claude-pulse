@@ -1,0 +1,348 @@
+#!/usr/bin/env python3
+"""monsgeek-claude-pulse: map Claude Code hook events to keyboard LED states.
+
+Reads the hook payload (JSON) from stdin, records this session's state,
+computes the most urgent state across all live Claude Code sessions, and
+applies it to the keyboard only when it actually changed.
+
+States, from most to least urgent:
+  approval  Claude is waiting for a permission decision   -> breathing orange
+  waiting   Claude asked a question or finished its turn  -> solid yellow
+  busy      Claude is working                             -> rainbow
+  idle      no live sessions                              -> your normal lighting
+
+Unless "restore_previous" is false in the config, the lighting found on the
+keyboard when the first session takes over is snapshotted and put back when the
+last session ends, instead of the fixed idle spec (which is then only a fallback).
+
+The LED command is written straight to the keyboard's vendor hidraw node
+(SET_LEDPARAM 0x07, as documented in monsgeek-akko-linux/docs/PROTOCOL.md),
+which also lets us set the "dazzle" flag that `iot_driver set-led` cannot.
+If no hidraw node is found, falls back to `iot_driver set-led`.
+
+Environment:
+  PULSE_DRY_RUN=1   print what would be sent instead of touching the keyboard
+  PULSE_LOG=1       append a trace to $STATE_DIR/pulse.log
+  PULSE_CONFIG      path to a JSON file overriding states / iot_driver
+  PULSE_STATE_DIR   override the state directory (used by tests)
+
+Never blocks Claude: every failure is swallowed and exit code is 0.
+"""
+import fcntl
+import glob
+import json
+import os
+import shutil
+import subprocess
+import sys
+import time
+
+# State spec: [mode, brightness 0-4, speed 0-4, r, g, b, "dazzle"?]
+# Mode is a name or number 0-25. A trailing "dazzle" sets the firmware's
+# colour-cycle / rainbow-gradient flag (its look depends on the mode).
+DEFAULT_STATES = {
+    "approval": ["breathing", 4, 3, 255, 110, 0],
+    "waiting":  ["constant", 4, 0, 255, 200, 0],
+    "busy":     ["rainbow", 4, 3],
+    "idle":     ["wave", 4, 2],
+}
+PRIORITY = {"approval": 3, "waiting": 2, "busy": 1}
+STALE_SECONDS = 12 * 3600  # drop session files this old even if the pid check passes
+
+EVENT_STATE = {
+    "SessionStart": "waiting",
+    "UserPromptSubmit": "busy",
+    "PostToolUse": "busy",
+    "Stop": "waiting",
+    "Notification": "approval",   # hooks.json only routes permission_prompt here
+    "PermissionRequest": "approval",
+    "SessionEnd": None,           # removes the session
+}
+
+LED_MODES = [
+    "off", "constant", "breathing", "neon", "wave", "ripple", "raindrop", "snake",
+    "reactive", "converge", "sine wave", "kaleidoscope", "line wave", "user picture",
+    "laser", "circle wave", "rainbow", "rain down", "meteor", "reactive off",
+    "music patterns", "screen sync", "music bars", "train", "fireworks", "per-key color",
+]
+VENDOR_ID = "00003151"
+SET_LEDPARAM, GET_LEDPARAM = 0x07, 0x87
+DAZZLE_ON, DAZZLE_OFF = 7, 8
+HIDIOCSFEATURE = 0xC0000000 | (65 << 16) | (ord("H") << 8) | 0x06
+HIDIOCGFEATURE = 0xC0000000 | (65 << 16) | (ord("H") << 8) | 0x07
+SNAPSHOT = "previous-led.json"
+
+
+def state_dir():
+    d = os.environ.get("PULSE_STATE_DIR")
+    if not d:
+        base = os.environ.get("XDG_RUNTIME_DIR") or "/tmp"
+        d = os.path.join(base, "monsgeek-claude-pulse")
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def log(d, msg):
+    if os.environ.get("PULSE_LOG"):
+        with open(os.path.join(d, "pulse.log"), "a") as f:
+            f.write(f"{time.strftime('%H:%M:%S')} {msg}\n")
+
+
+def load_config():
+    """-> (states, iot_driver path or None, restore_previous flag)"""
+    states = dict(DEFAULT_STATES)
+    driver = None
+    restore = True
+    path = os.environ.get("PULSE_CONFIG") or os.path.expanduser(
+        "~/.config/monsgeek-claude-pulse/config.json")
+    try:
+        with open(path) as f:
+            cfg = json.load(f)
+        for k, v in cfg.get("states", {}).items():
+            if k in states and isinstance(v, list):
+                states[k] = v
+        driver = cfg.get("iot_driver")
+        restore = bool(cfg.get("restore_previous", True))
+    except (OSError, ValueError):
+        pass
+    return states, driver, restore
+
+
+def parse_spec(spec):
+    """-> (mode, brightness, speed, r, g, b, dazzle)"""
+    spec = list(spec)
+    dazzle = False
+    if spec and isinstance(spec[-1], str) and spec[-1].lower() == "dazzle":
+        dazzle = True
+        spec.pop()
+    mode = spec[0] if spec else "constant"
+    if isinstance(mode, str) and not mode.lstrip("-").isdigit():
+        mode = LED_MODES.index(mode.lower().replace("_", " ")) if mode.lower().replace("_", " ") in LED_MODES else 1
+    nums = [int(x) for x in spec[1:]]
+    nums += [4, 2, 255, 255, 255][len(nums):]  # same defaults as `iot_driver set-led`
+    b, s, r, g, bl = nums[:5]
+    return int(mode), min(b, 4), min(s, 4), r & 255, g & 255, bl & 255, dazzle
+
+
+def find_hidraw():
+    """The keyboard's vendor-config interface: VID 0x3151, usage page 0xFFFF."""
+    for sysdev in sorted(glob.glob("/sys/class/hidraw/hidraw*")):
+        try:
+            with open(os.path.join(sysdev, "device", "uevent")) as f:
+                if f"HID_ID=0003:{VENDOR_ID}:" not in f.read():
+                    continue
+            with open(os.path.join(sysdev, "device", "report_descriptor"), "rb") as f:
+                if not f.read(3) == b"\x06\xff\xff":
+                    continue
+        except OSError:
+            continue
+        node = "/dev/" + os.path.basename(sysdev)
+        if os.access(node, os.W_OK):
+            return node
+    return None
+
+
+def led_report(mode, brightness, speed, r, g, b, dazzle):
+    data = [SET_LEDPARAM, mode, 4 - speed, brightness, DAZZLE_ON if dazzle else DAZZLE_OFF, r, g, b]
+    data.append(255 - (sum(data) & 0xFF))  # "Bit8" checksum
+    return bytes([0] + data + [0] * (64 - len(data)))
+
+
+def send_led(node, report):
+    with open(node, "r+b", buffering=0) as f:
+        fcntl.ioctl(f, HIDIOCSFEATURE, report)
+
+
+def parse_led_response(data):
+    """GET_LEDPARAM echo: cmd, mode, speed(inverted), brightness, option, r, g, b"""
+    return {
+        "mode": data[1], "speed": 4 - min(data[2], 4), "brightness": data[3],
+        "dazzle": (data[4] & 0x0F) == DAZZLE_ON,
+        "r": data[5], "g": data[6], "b": data[7],
+    }
+
+
+def spec_from(led):
+    name = LED_MODES[led["mode"]] if led["mode"] < len(LED_MODES) else led["mode"]
+    spec = [name, led["brightness"], led["speed"], led["r"], led["g"], led["b"]]
+    if led["dazzle"]:
+        spec.append("dazzle")
+    return spec
+
+
+def read_led(node):
+    """Current LED settings as a config spec, read from the keyboard."""
+    query = [GET_LEDPARAM, 0, 0, 0, 0, 0, 0]
+    query.append(255 - (sum(query) & 0xFF))  # "Bit7" checksum
+    report = bytes([0] + query + [0] * (64 - len(query)))
+    with open(node, "r+b", buffering=0) as f:
+        for _ in range(3):  # hidraw may hand back a stale buffered response first
+            fcntl.ioctl(f, HIDIOCSFEATURE, report)
+            time.sleep(0.1)
+            buf = bytearray(65)
+            fcntl.ioctl(f, HIDIOCGFEATURE, buf)
+            data = bytes(buf[1:])
+            if data[0] == GET_LEDPARAM:
+                return spec_from(parse_led_response(data))
+    raise RuntimeError("keyboard did not answer GET_LEDPARAM")
+
+
+def snapshot_path(d):
+    return os.path.join(d, SNAPSHOT)
+
+
+def take_snapshot(d, node, states):
+    """Remember the keyboard's lighting before we change it, unless it already
+    shows one of our own states (hooks died mid-session and left it there)."""
+    if os.path.exists(snapshot_path(d)):
+        return None
+    spec = read_led(node)
+    ours = {tuple(parse_spec(v)) for k, v in states.items() if k != "idle"}
+    if tuple(parse_spec(spec)) in ours:
+        return None
+    with open(snapshot_path(d), "w") as f:
+        json.dump(spec, f)
+    return spec
+
+
+def pop_snapshot(d):
+    try:
+        with open(snapshot_path(d)) as f:
+            spec = json.load(f)
+        os.remove(snapshot_path(d))
+        return spec
+    except (OSError, ValueError):
+        return None
+
+
+def claude_pid():
+    """Walk up the process tree to the Claude Code process that spawned us."""
+    pid = os.getppid()
+    for _ in range(8):
+        try:
+            with open(f"/proc/{pid}/stat") as f:
+                fields = f.read().rsplit(")", 1)
+            comm = fields[0].split("(", 1)[1]
+            ppid = int(fields[1].split()[1])
+        except (OSError, IndexError, ValueError):
+            return None
+        if comm in ("claude", "node"):
+            return pid
+        if ppid <= 1:
+            return None
+        pid = ppid
+    return None
+
+
+def pid_alive(pid):
+    if not pid:
+        return True  # unknown pid: assume alive, rely on STALE_SECONDS
+    return os.path.exists(f"/proc/{pid}")
+
+
+def event_to_state(payload):
+    event = payload.get("hook_event_name", "")
+    if event == "PreToolUse":
+        return "waiting" if payload.get("tool_name") == "AskUserQuestion" else "busy"
+    if event not in EVENT_STATE:
+        return "ignore"
+    return EVENT_STATE[event]
+
+
+def write_session(d, session, state):
+    path = os.path.join(d, f"session-{session}.json")
+    if state is None:
+        try:
+            os.remove(path)
+        except FileNotFoundError:
+            pass
+        return
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump({"state": state, "pid": claude_pid(), "t": time.time()}, f)
+    os.replace(tmp, path)
+
+
+def global_state(d):
+    best, best_p = "idle", 0
+    now = time.time()
+    for name in os.listdir(d):
+        if not name.startswith("session-") or not name.endswith(".json"):
+            continue
+        path = os.path.join(d, name)
+        try:
+            with open(path) as f:
+                rec = json.load(f)
+        except (OSError, ValueError):
+            continue
+        if now - rec.get("t", 0) > STALE_SECONDS or not pid_alive(rec.get("pid")):
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+            continue
+        p = PRIORITY.get(rec.get("state"), 0)
+        if p > best_p:
+            best, best_p = rec["state"], p
+    return best
+
+
+def apply(d, state, states, driver, restore=False):
+    last_path = os.path.join(d, "last-applied")
+    try:
+        with open(last_path) as f:
+            if f.read().strip() == state:
+                return False
+    except OSError:
+        pass
+    node = find_hidraw()
+    dry = bool(os.environ.get("PULSE_DRY_RUN"))
+    spec = states[state]
+    if restore and node and not dry:
+        if state == "idle":
+            spec = pop_snapshot(d) or spec
+        else:
+            taken = take_snapshot(d, node, states)
+            if taken:
+                log(d, f"snapshot {taken}")
+    mode, bright, speed, r, g, b, dazzle = parse_spec(spec)
+    desc = f"led mode={mode} brightness={bright} speed={speed} rgb={r},{g},{b} dazzle={dazzle}"
+    if dry:
+        print(f"DRY_RUN {desc} via {node or 'iot_driver'}", file=sys.stderr)
+    elif node:
+        send_led(node, led_report(mode, bright, speed, r, g, b, dazzle))
+    else:
+        exe = driver or shutil.which("iot_driver") or "/usr/local/bin/iot_driver"
+        subprocess.run([exe, "set-led", *map(str, (mode, bright, speed, r, g, b))],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5, check=False)
+    with open(last_path, "w") as f:
+        f.write(state)
+    return True
+
+
+def main():
+    raw = sys.stdin.read()
+    payload = json.loads(raw) if raw.strip() else {}
+    d = state_dir()
+    session = str(payload.get("session_id") or "nosession").replace("/", "_")
+    state = event_to_state(payload)
+    if state == "ignore":
+        return
+    states, driver, restore = load_config()
+    with open(os.path.join(d, ".lock"), "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        write_session(d, session, state)
+        g = global_state(d)
+        changed = apply(d, g, states, driver, restore)
+    log(d, f"{payload.get('hook_event_name')} session={session[:8]} -> {state} global={g} applied={changed}")
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as e:  # never block Claude Code
+        try:
+            log(state_dir(), f"error: {e!r}")
+        except Exception:
+            pass
+    sys.exit(0)
