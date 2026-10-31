@@ -1,4 +1,6 @@
-# Setup
+# Setup (Linux)
+
+Windows users: see [windows.md](windows.md) instead; nothing below applies there.
 
 The plugin itself is plain Python and needs no installation. What takes a few steps is getting
 unprivileged access to the keyboard's vendor HID interface, which comes from the udev rule shipped

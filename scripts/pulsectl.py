@@ -30,6 +30,10 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import pulse  # noqa: E402
 
+NO_DEVICE = ("keyboard not found: no HID interface with vendor 3151 and usage page ffff"
+             + ("; run scripts/pulse_windows.py to see what Windows exposes" if pulse.WINDOWS
+                else " that we may write; is the keyboard wired and the udev rule installed?"))
+
 
 def canonical(state):
     return pulse.STATE_ALIASES.get(state, state)
@@ -54,9 +58,9 @@ def cmd_revert():
     spec = pulse.pop_snapshot(d)
     if not spec:
         sys.exit("no snapshot of previous lighting (restore_previous off, or nothing taken over yet)")
-    node = pulse.find_hidraw()
+    node = pulse.find_device()
     if not node:
-        sys.exit("no writable hidraw node for the keyboard")
+        sys.exit(NO_DEVICE)
     pulse.send_led(node, pulse.led_report(*pulse.parse_spec(spec)))
     try:
         os.remove(os.path.join(d, "last-applied"))
@@ -107,16 +111,16 @@ def cmd_status():
             print(f"snapshot:     {json.load(f)}  (lighting before takeover)")
     except (OSError, ValueError):
         print("snapshot:     (none)")
-    node = pulse.find_hidraw()
-    print(f"hidraw node:  {node or '(not found)'}")
+    node = pulse.find_device()
+    print(f"device:       {node or '(not found)'}")
     if node:
         print(f"keyboard:     {pulse.read_led(node)}")
 
 
 def cmd_scan(save=None):
-    node = pulse.find_hidraw()
+    node = pulse.find_device()
     if not node:
-        sys.exit("no writable hidraw node for the keyboard; is the udev rule installed?")
+        sys.exit(NO_DEVICE)
     spec = pulse.read_led(node)
     print(json.dumps(spec))
     if save:

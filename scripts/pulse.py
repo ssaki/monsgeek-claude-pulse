@@ -21,10 +21,12 @@ Unless "restore_previous" is false in the config, the lighting found on the
 keyboard when the first session takes over is snapshotted and put back when the
 last session ends, instead of the fixed idle spec (which is then only a fallback).
 
-The LED command is written straight to the keyboard's vendor hidraw node
+The LED command is written straight to the keyboard's vendor HID interface
 (SET_LEDPARAM 0x07, as documented in monsgeek-akko-linux/docs/PROTOCOL.md),
 which also lets us set the "dazzle" flag that `iot_driver set-led` cannot.
-If no hidraw node is found, falls back to `iot_driver set-led`.
+On Linux that is the hidraw node; if none is found, falls back to
+`iot_driver set-led`. On Windows it is a HID feature report through hid.dll
+(see pulse_windows.py); no driver is needed there.
 
 Environment:
   PULSE_DRY_RUN=1   print what would be sent instead of touching the keyboard
@@ -34,8 +36,6 @@ Environment:
 
 Never blocks Claude: every failure is swallowed and exit code is 0.
 """
-import fcntl
-import glob
 import hashlib
 import json
 import os
@@ -43,6 +43,15 @@ import shutil
 import subprocess
 import sys
 import time
+
+WINDOWS = sys.platform == "win32"
+if WINDOWS:
+    import msvcrt
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import pulse_windows as win
+else:
+    import fcntl
+    import glob
 
 # State spec: [mode, brightness 0-4, speed 0-4, r, g, b, "dazzle"?]
 # Mode is a name or number 0-25. A trailing "dazzle" sets the firmware's
@@ -90,7 +99,7 @@ SNAPSHOT = "previous-led.json"
 def state_dir():
     d = os.environ.get("PULSE_STATE_DIR")
     if not d:
-        base = os.environ.get("XDG_RUNTIME_DIR") or "/tmp"
+        base = win.state_base() if WINDOWS else (os.environ.get("XDG_RUNTIME_DIR") or "/tmp")
         d = os.path.join(base, "monsgeek-claude-pulse")
     os.makedirs(d, exist_ok=True)
     return d
@@ -103,8 +112,11 @@ def log(d, msg):
 
 
 def config_path():
-    return os.environ.get("PULSE_CONFIG") or os.path.expanduser(
-        "~/.config/monsgeek-claude-pulse/config.json")
+    if os.environ.get("PULSE_CONFIG"):
+        return os.environ["PULSE_CONFIG"]
+    if WINDOWS:
+        return os.path.join(win.config_dir(), "config.json")
+    return os.path.expanduser("~/.config/monsgeek-claude-pulse/config.json")
 
 
 def load_config():
@@ -148,8 +160,11 @@ def parse_spec(spec):
 
 # ---------------------------------------------------------------- keyboard
 
-def find_hidraw():
-    """The keyboard's vendor-config interface: VID 0x3151, usage page 0xFFFF."""
+def find_device():
+    """The keyboard's vendor-config interface: VID 0x3151, usage page 0xFFFF.
+    A /dev/hidrawN node on Linux, a \\\\?\\hid#... device path on Windows."""
+    if WINDOWS:
+        return win.find_device()
     for sysdev in sorted(glob.glob("/sys/class/hidraw/hidraw*")):
         try:
             with open(os.path.join(sysdev, "device", "uevent")) as f:
@@ -172,9 +187,25 @@ def led_report(mode, brightness, speed, r, g, b, dazzle):
     return bytes([0] + data + [0] * (64 - len(data)))
 
 
-def send_led(node, report):
+def _set_feature(node, report):
+    if WINDOWS:
+        win.set_feature(node, report)
+        return
     with open(node, "r+b", buffering=0) as f:
         fcntl.ioctl(f, HIDIOCSFEATURE, report)
+
+
+def _get_feature(node):
+    if WINDOWS:
+        return win.get_feature(node, 65)
+    buf = bytearray(65)
+    with open(node, "r+b", buffering=0) as f:
+        fcntl.ioctl(f, HIDIOCGFEATURE, buf)
+    return bytes(buf)
+
+
+def send_led(node, report):
+    _set_feature(node, report)
 
 
 def parse_led_response(data):
@@ -199,15 +230,12 @@ def read_led(node):
     query = [GET_LEDPARAM, 0, 0, 0, 0, 0, 0]
     query.append(255 - (sum(query) & 0xFF))  # "Bit7" checksum
     report = bytes([0] + query + [0] * (64 - len(query)))
-    with open(node, "r+b", buffering=0) as f:
-        for _ in range(3):  # hidraw may hand back a stale buffered response first
-            fcntl.ioctl(f, HIDIOCSFEATURE, report)
-            time.sleep(0.1)
-            buf = bytearray(65)
-            fcntl.ioctl(f, HIDIOCGFEATURE, buf)
-            data = bytes(buf[1:])
-            if data[0] == GET_LEDPARAM:
-                return spec_from(parse_led_response(data))
+    for _ in range(3):  # hidraw may hand back a stale buffered response first
+        _set_feature(node, report)
+        time.sleep(0.1)
+        data = _get_feature(node)[1:]
+        if data[0] == GET_LEDPARAM:
+            return spec_from(parse_led_response(data))
     raise RuntimeError("keyboard did not answer GET_LEDPARAM")
 
 
@@ -304,9 +332,30 @@ def stage_state(d, cwd, default):
 
 # ---------------------------------------------------------------- sessions
 
+_PROCS = None
+
+
+def _procs():
+    """Windows only: {pid: (ppid, exe)} snapshot, taken once per hook run."""
+    global _PROCS
+    if _PROCS is None:
+        _PROCS = win.process_table()
+    return _PROCS
+
+
 def claude_pid():
     """Walk up the process tree to the Claude Code process that spawned us."""
     pid = os.getppid()
+    if WINDOWS:
+        table = _procs()
+        for _ in range(8):
+            ppid, exe = table.get(pid, (0, ""))
+            if exe.lower() in ("claude.exe", "node.exe"):
+                return pid
+            if not ppid or ppid == pid:
+                return None
+            pid = ppid
+        return None
     for _ in range(8):
         try:
             with open(f"/proc/{pid}/stat") as f:
@@ -326,6 +375,8 @@ def claude_pid():
 def pid_alive(pid):
     if not pid:
         return True  # unknown pid: assume alive, rely on STALE_SECONDS
+    if WINDOWS:
+        return pid in _procs()
     return os.path.exists(f"/proc/{pid}")
 
 
@@ -386,7 +437,7 @@ def apply(d, state, states, driver, restore=False):
                 return False
     except OSError:
         pass
-    node = find_hidraw()
+    node = find_device()
     dry = bool(os.environ.get("PULSE_DRY_RUN"))
     spec = states[state]
     if restore and node and not dry:
@@ -402,6 +453,9 @@ def apply(d, state, states, driver, restore=False):
         print(f"DRY_RUN {desc} via {node or 'iot_driver'}", file=sys.stderr)
     elif node:
         send_led(node, led_report(mode, bright, speed, r, g, b, dazzle))
+    elif WINDOWS:
+        log(d, "no keyboard found (vendor 3151, usage page ffff); nothing sent")
+        return False
     else:
         exe = driver or shutil.which("iot_driver") or "/usr/local/bin/iot_driver"
         subprocess.run([exe, "set-led", *map(str, (mode, bright, speed, r, g, b))],
@@ -421,10 +475,17 @@ def main():
     if state == "ignore":
         return
     with open(os.path.join(d, ".lock"), "w") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
-        write_session(d, session, state)
-        g = global_state(d)
-        changed = apply(d, g, states, driver, restore)
+        if WINDOWS:
+            msvcrt.locking(lock.fileno(), msvcrt.LK_LOCK, 1)  # retries for ~10 s, then raises
+        else:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            write_session(d, session, state)
+            g = global_state(d)
+            changed = apply(d, g, states, driver, restore)
+        finally:
+            if WINDOWS:
+                msvcrt.locking(lock.fileno(), msvcrt.LK_UNLCK, 1)
     log(d, f"{payload.get('hook_event_name')} session={session[:8]} -> {state} global={g} applied={changed}")
 
 

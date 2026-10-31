@@ -22,24 +22,28 @@ It is a Claude Code plugin made of [hooks](https://code.claude.com/docs/en/hooks
 `scripts/pulse.py`, which records the session's state, picks the most urgent state across all
 running sessions, and only talks to the keyboard when that state changes.
 
-The script writes the firmware's `SET_LEDPARAM` command straight to the keyboard's vendor hidraw
-node, following the protocol reverse-engineered by
+The script writes the firmware's `SET_LEDPARAM` command straight to the keyboard's vendor HID
+interface, following the protocol reverse-engineered by
 [monsgeek-akko-linux](https://github.com/echtzeit-solutions/monsgeek-akko-linux) for the RongYuan
-RY5088 / YC3121 firmware used in MonsGeek and Akko Hall-effect boards. That driver is still
-needed for its udev rule (hidraw access without root) and is the easiest way to read and
-experiment with the lighting (`iot_driver led`, `iot_driver tui`).
+RY5088 / YC3121 firmware used in MonsGeek and Akko Hall-effect boards. On Linux that is the
+hidraw node, and the driver is still needed for its udev rule (hidraw access without root); it is
+also the easiest way to read and experiment with the lighting (`iot_driver led`, `iot_driver tui`).
+On Windows it is a HID feature report through `hid.dll`, with nothing to install.
 
 ## Requirements
 
-- Linux with a MonsGeek or Akko keyboard on RY5088 / YC3121 firmware (USB vendor ID `3151`).
-  Tested with a MonsGeek M1 V5 HE wired (`3151:5030`). Check the driver's device list for others.
+- A MonsGeek or Akko keyboard on RY5088 / YC3121 firmware (USB vendor ID `3151`), wired.
+  Tested with a MonsGeek M1 V5 HE (`3151:5030`). Check the driver's device list for others.
+- Linux, or Windows with Claude Code running on the host (not in WSL, which cannot see USB HID).
+  See [docs/windows.md](docs/windows.md) for Windows.
 - Python 3.8 or newer. No third-party packages.
 - Claude Code 2.1 or newer.
-- The `monsgeek-akko-linux` driver, for its udev rule. See [docs/setup.md](docs/setup.md).
+- On Linux, the `monsgeek-akko-linux` driver, for its udev rule. See [docs/setup.md](docs/setup.md).
 
 ## Setup
 
-Full walkthrough in [docs/setup.md](docs/setup.md). Short version, from the repository root:
+Linux walkthrough in [docs/setup.md](docs/setup.md), Windows in [docs/windows.md](docs/windows.md).
+Short Linux version, from the repository root:
 
 ```bash
 # 1. Driver and udev rule (one time; Debian/Ubuntu package names, see upstream README for others)
@@ -61,7 +65,7 @@ claude plugin install monsgeek-claude-pulse@monsgeek-claude-pulse
 
 ## Configuration
 
-Optional file `~/.config/monsgeek-claude-pulse/config.json`. Each state is
+Optional file `~/.config/monsgeek-claude-pulse/config.json` (`%APPDATA%\monsgeek-claude-pulse\config.json` on Windows). Each state is
 `[mode, brightness 0-4, speed 0-4, r, g, b]`, the same order as `iot_driver set-led`, plus an
 optional trailing `"dazzle"`. Mode names and numbers are in the driver's
 [CLI reference](https://github.com/echtzeit-solutions/monsgeek-akko-linux/blob/master/docs/CLI.md).
@@ -156,12 +160,13 @@ cat "${XDG_RUNTIME_DIR:-/tmp}/monsgeek-claude-pulse/pulse.log"
 python3 tests/test_pulse.py -v                         # synthetic hook events, no keyboard needed
 ```
 
-If no writable hidraw node for vendor `3151` is found, the script falls back to
-`iot_driver set-led`, without dazzle support. Runtime state lives in
-`$XDG_RUNTIME_DIR/monsgeek-claude-pulse/`: one file per session, `last-applied`, and
-`previous-led.json` while a snapshot is held, and `stage-<project>.json` per hinted project. Sessions whose Claude process has exited are
-dropped automatically, so a killed terminal does not leave a stale "approval" colour behind for
-long. If the LEDs ever get stuck, run `pulsectl.py reset` or delete that directory.
+If no writable hidraw node for vendor `3151` is found on Linux, the script falls back to
+`iot_driver set-led`, without dazzle support; on Windows it logs and does nothing. Runtime state
+lives in `$XDG_RUNTIME_DIR/monsgeek-claude-pulse/` (`%LOCALAPPDATA%\monsgeek-claude-pulse\` on
+Windows): one file per session, `last-applied`, `previous-led.json` while a snapshot is held, and
+`stage-<project>.json` per hinted project. Sessions whose Claude process has exited are dropped
+automatically, so a killed terminal does not leave a stale "approval" colour behind for long. If
+the LEDs ever get stuck, run `pulsectl.py reset` or delete that directory.
 
 ## Events used
 
@@ -183,10 +188,12 @@ long. If the LEDs ever get stuck, run `pulsectl.py reset` or delete that directo
 .claude-plugin/marketplace.json lets you `claude plugin marketplace add <this dir>`
 hooks/hooks.json                event -> scripts/pulse.py
 scripts/pulse.py                the hook handler
+scripts/pulse_windows.py        Windows HID and process access (ctypes), used by pulse.py there
 scripts/pulsectl.py             manual control: set / reset / revert / status / scan / stage
 skills/pulse-stage/SKILL.md     tells the agent how and when to leave a stage hint
 tests/test_pulse.py             dry-run tests
-docs/setup.md                   driver install walkthrough
+docs/setup.md                   Linux driver install walkthrough
+docs/windows.md                 Windows notes and verification checklist
 vendor/                         (gitignored) clone of monsgeek-akko-linux
 ```
 

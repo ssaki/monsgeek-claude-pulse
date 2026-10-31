@@ -2,30 +2,30 @@
   "description": "Drive MonsGeek/Akko keyboard RGB from Claude Code's state",
   "hooks": {
     "SessionStart": [
-      { "hooks": [ { "type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/pulse.py\"", "timeout": 10 } ] }
+      { "hooks": [ { "type": "command", "command": "case \"$OSTYPE\" in msys*|cygwin*) py=python;; *) py=python3;; esac; exec \"$py\" \"${CLAUDE_PLUGIN_ROOT}/scripts/pulse.py\"", "timeout": 10 } ] }
     ],
     "UserPromptSubmit": [
-      { "hooks": [ { "type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/pulse.py\"", "timeout": 10 } ] }
+      { "hooks": [ { "type": "command", "command": "case \"$OSTYPE\" in msys*|cygwin*) py=python;; *) py=python3;; esac; exec \"$py\" \"${CLAUDE_PLUGIN_ROOT}/scripts/pulse.py\"", "timeout": 10 } ] }
     ],
     "PreToolUse": [
       { "matcher": "AskUserQuestion",
-        "hooks": [ { "type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/pulse.py\"", "timeout": 10 } ] }
+        "hooks": [ { "type": "command", "command": "case \"$OSTYPE\" in msys*|cygwin*) py=python;; *) py=python3;; esac; exec \"$py\" \"${CLAUDE_PLUGIN_ROOT}/scripts/pulse.py\"", "timeout": 10 } ] }
     ],
     "PostToolUse": [
-      { "hooks": [ { "type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/pulse.py\"", "timeout": 10 } ] }
+      { "hooks": [ { "type": "command", "command": "case \"$OSTYPE\" in msys*|cygwin*) py=python;; *) py=python3;; esac; exec \"$py\" \"${CLAUDE_PLUGIN_ROOT}/scripts/pulse.py\"", "timeout": 10 } ] }
     ],
     "PermissionRequest": [
-      { "hooks": [ { "type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/pulse.py\"", "timeout": 10 } ] }
+      { "hooks": [ { "type": "command", "command": "case \"$OSTYPE\" in msys*|cygwin*) py=python;; *) py=python3;; esac; exec \"$py\" \"${CLAUDE_PLUGIN_ROOT}/scripts/pulse.py\"", "timeout": 10 } ] }
     ],
     "Notification": [
       { "matcher": "permission_prompt",
-        "hooks": [ { "type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/pulse.py\"", "timeout": 10 } ] }
+        "hooks": [ { "type": "command", "command": "case \"$OSTYPE\" in msys*|cygwin*) py=python;; *) py=python3;; esac; exec \"$py\" \"${CLAUDE_PLUGIN_ROOT}/scripts/pulse.py\"", "timeout": 10 } ] }
     ],
     "Stop": [
-      { "hooks": [ { "type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/pulse.py\"", "timeout": 10 } ] }
+      { "hooks": [ { "type": "command", "command": "case \"$OSTYPE\" in msys*|cygwin*) py=python;; *) py=python3;; esac; exec \"$py\" \"${CLAUDE_PLUGIN_ROOT}/scripts/pulse.py\"", "timeout": 10 } ] }
     ],
     "SessionEnd": [
-      { "hooks": [ { "type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/pulse.py\"", "timeout": 10 } ] }
+      { "hooks": [ { "type": "command", "command": "case \"$OSTYPE\" in msys*|cygwin*) py=python;; *) py=python3;; esac; exec \"$py\" \"${CLAUDE_PLUGIN_ROOT}/scripts/pulse.py\"", "timeout": 10 } ] }
     ]
   }
 }

@@ -158,15 +158,61 @@ class PulseTest(unittest.TestCase):
 
     def test_snapshot_skips_our_own_states(self):
         states = dict(pulse.DEFAULT_STATES)
-        with tempfile.TemporaryDirectory() as d:
-            pulse.read_led = lambda node: ["constant", 4, 0, 255, 120, 0]  # our "review" colour
-            self.assertIsNone(pulse.take_snapshot(d, "/dev/null", states))
-            self.assertIsNone(pulse.pop_snapshot(d))
-            pulse.read_led = lambda node: ["wave", 3, 1, 1, 2, 3, "dazzle"]
-            self.assertEqual(pulse.take_snapshot(d, "/dev/null", states), ["wave", 3, 1, 1, 2, 3, "dazzle"])
-            self.assertIsNone(pulse.take_snapshot(d, "/dev/null", states), "second takeover keeps the first snapshot")
-            self.assertEqual(pulse.pop_snapshot(d), ["wave", 3, 1, 1, 2, 3, "dazzle"])
-            self.assertIsNone(pulse.pop_snapshot(d))
+        real_read_led = pulse.read_led
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                pulse.read_led = lambda node: ["constant", 4, 0, 255, 120, 0]  # our "review" colour
+                self.assertIsNone(pulse.take_snapshot(d, "/dev/null", states))
+                self.assertIsNone(pulse.pop_snapshot(d))
+                pulse.read_led = lambda node: ["wave", 3, 1, 1, 2, 3, "dazzle"]
+                self.assertEqual(pulse.take_snapshot(d, "/dev/null", states), ["wave", 3, 1, 1, 2, 3, "dazzle"])
+                self.assertIsNone(pulse.take_snapshot(d, "/dev/null", states), "second takeover keeps the first snapshot")
+                self.assertEqual(pulse.pop_snapshot(d), ["wave", 3, 1, 1, 2, 3, "dazzle"])
+                self.assertIsNone(pulse.pop_snapshot(d))
+        finally:
+            pulse.read_led = real_read_led
+
+    def test_windows_backend_compiles(self):
+        import py_compile
+        py_compile.compile(os.path.join(SCRIPTS, "pulse_windows.py"), doraise=True)
+
+    def test_windows_code_paths_with_fake_backend(self):
+        """The Windows branches of pulse.py, driven by a stand-in for pulse_windows."""
+        class FakeWin:
+            table = {100: (1, "explorer.exe"), 200: (100, "claude.exe"), 300: (200, "bash.exe"),
+                     os.getpid(): (300, "python.exe")}
+            sent = []
+            def process_table(self):
+                return self.table
+            def find_device(self):
+                return r"\\?\hid#vid_3151&pid_5030&mi_01#fake"
+            def set_feature(self, path, report):
+                self.sent.append((path, bytes(report)))
+            def get_feature(self, path, length=65):
+                return bytes([0, 0x87, 7, 2, 4, 8, 37, 111, 97]).ljust(length, b"\0")
+            def state_base(self):
+                return self.tmp
+        fake = FakeWin()
+        fake.tmp = self.tmp.name
+        saved = (pulse.WINDOWS, getattr(pulse, "win", None), pulse._PROCS, os.getppid)
+        try:
+            pulse.WINDOWS, pulse.win, pulse._PROCS = True, fake, None
+            os.getppid = lambda: 300  # we are python under bash under claude.exe
+            self.assertEqual(pulse.claude_pid(), 200)
+            self.assertTrue(pulse.pid_alive(200))
+            self.assertFalse(pulse.pid_alive(999))
+            node = pulse.find_device()
+            self.assertIn("vid_3151", node)
+            self.assertEqual(pulse.read_led(node), ["snake", 4, 2, 37, 111, 97])
+            self.assertEqual(fake.sent[0][1][1], 0x87, "GET_LEDPARAM query went out first")
+            pulse.send_led(node, pulse.led_report(1, 4, 0, 255, 120, 0, False))
+            self.assertEqual(fake.sent[-1][1][:10].hex(), "000701040408ff780070")
+            # no keyboard on Windows: apply gives up quietly instead of calling iot_driver
+            fake.find_device = lambda: None
+            with tempfile.TemporaryDirectory() as d:
+                self.assertFalse(pulse.apply(d, "busy", dict(pulse.DEFAULT_STATES), None, False))
+        finally:
+            pulse.WINDOWS, pulse.win, pulse._PROCS, os.getppid = saved
 
     def test_pulsectl_set_reset_and_bad_state(self):
         self.assertIn(APPROVAL, self.ctl("set", "approval").stderr)
