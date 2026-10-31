@@ -3,15 +3,18 @@
 Visual feedback for [Claude Code](https://code.claude.com) on a MonsGeek / Akko keyboard's RGB
 lighting. The keyboard shows what the agent is doing, so you can look away from the terminal:
 
-| Claude Code state | Default lighting |
-|---|---|
-| working on your prompt | rainbow |
-| waiting for a permission decision | pulsing orange |
-| asked you a question, or finished its turn | solid yellow |
-| no live sessions | whatever the keyboard showed before, or a configured idle mode |
+| What it asks of you | State | Default lighting |
+|---|---|---|
+| decide now: a permission prompt is blocking | approval | pulsing orange |
+| make progress: a stage concluded, read / comment / approve | review | solid orange |
+| nothing, Claude is working | busy | rainbow |
+| nothing, but a session is open and you were doing something | open | dim blue |
+| nothing, no live sessions | idle | whatever the keyboard showed before |
 
-All four are configurable, and you can capture any lighting the keyboard is currently showing
-with one command.
+All five are configurable, and you can capture any lighting the keyboard is currently showing
+with one command. The "review" state comes from the agent itself, through a hint it leaves for
+the project (see [Stage hints](#stage-hints)), so the keyboard can tell "done for now" from
+"done, and the ball is in your court".
 
 ## How it works
 
@@ -66,10 +69,12 @@ optional trailing `"dazzle"`. Mode names and numbers are in the driver's
 ```json
 {
   "restore_previous": true,
+  "on_stop": "open",
   "states": {
     "approval": ["breathing", 4, 4, 255, 50, 0],
-    "waiting":  ["constant", 4, 0, 255, 50, 0],
+    "review":   ["constant", 4, 0, 255, 50, 0],
     "busy":     ["snake", 4, 2, 37, 111, 97],
+    "open":     ["constant", 2, 4, 26, 220, 255],
     "idle":     ["constant", 2, 0, 0, 255, 0, "dazzle"]
   }
 }
@@ -79,6 +84,10 @@ optional trailing `"dazzle"`. Mode names and numbers are in the driver's
   session takes over, and put it back when the last session ends. `idle` is then only a fallback
   for when no snapshot exists. Set it to `false` to always end on the `idle` spec instead. If the keyboard is already showing one of the plugin's own states at takeover, because
   hooks died earlier and left it there, nothing is snapshotted.
+- `on_stop` (default `"open"`): what a finished turn looks like when no stage hint says
+  `review`. `"open"` is the subtle session colour, `"idle"` goes all the way back to normal
+  lighting after every turn, `"review"` holds the attention colour until your next prompt.
+- The pre-0.2 state name `waiting` is still accepted and means `review`.
 - `"dazzle"` sets the firmware's colour-cycle flag. On `constant` it gives the static rainbow
   gradient these keyboards ship with. `iot_driver set-led` cannot set it, which is one reason the
   script talks to hidraw directly.
@@ -88,6 +97,35 @@ optional trailing `"dazzle"`. Mode names and numbers are in the driver's
 The easiest way to build a config is to set the lighting you want using the keyboard's Fn keys or
 `iot_driver tui`, then run `scan --save <state>` for each state.
 
+## Stage hints
+
+The hooks can see that Claude stopped, but not whether the work is at a point that needs you.
+The agent knows, so it tells the plugin. The repository ships a `pulse-stage` skill with the
+vocabulary and the command:
+
+```bash
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/pulsectl.py" stage review "spec drafted, needs your comments"
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/pulsectl.py" stage open "plan approved, implementing"
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/pulsectl.py" stage clear
+```
+
+While a project's hint says `review`, every finished turn and every new session on that project
+shows the review colour. It is keyed by the project's git root, stored in the plugin's state
+directory, and expires after a day so a forgotten hint does not nag forever. Projects without a
+hint behave as before.
+
+The skill explains when to set it, but the trigger is up to you. Opt a project in with a line in
+its `CLAUDE.md`, for example:
+
+```markdown
+When a spec, plan, or task stage concludes and needs my review before work can continue,
+record it with the pulse-stage skill. Clear it when I have responded and work moves on.
+```
+
+If you would rather keep the hint inside the repository, a file named `.pulse-stage` in the
+project root, first line `review` or `open` followed by an optional note, overrides the stored
+hint. Remember to gitignore it.
+
 ## Manual control
 
 If the hooks go missing, for example after a force-quit of the agent or the IDE, the keyboard
@@ -96,11 +134,12 @@ stays on whatever was last applied. `scripts/pulsectl.py` fixes that by hand:
 ```bash
 python3 scripts/pulsectl.py reset            # forget all sessions, apply idle (or the snapshot)
 python3 scripts/pulsectl.py revert           # put back the lighting snapshotted at takeover
-python3 scripts/pulsectl.py set approval     # apply one state: approval, waiting, busy, idle
+python3 scripts/pulsectl.py set approval     # apply one state: approval, review, busy, open, idle
 python3 scripts/pulsectl.py status           # tracked sessions, last applied, keyboard readback
 python3 scripts/pulsectl.py scan             # print the keyboard's current lighting as a config spec
 python3 scripts/pulsectl.py scan --save busy # ...and store it as that state in the config
 python3 scripts/pulsectl.py list             # show the configured states
+python3 scripts/pulsectl.py stage            # show this project's stage hint
 ```
 
 A shell alias keeps it short:
@@ -120,7 +159,7 @@ python3 tests/test_pulse.py -v                         # synthetic hook events, 
 If no writable hidraw node for vendor `3151` is found, the script falls back to
 `iot_driver set-led`, without dazzle support. Runtime state lives in
 `$XDG_RUNTIME_DIR/monsgeek-claude-pulse/`: one file per session, `last-applied`, and
-`previous-led.json` while a snapshot is held. Sessions whose Claude process has exited are
+`previous-led.json` while a snapshot is held, and `stage-<project>.json` per hinted project. Sessions whose Claude process has exited are
 dropped automatically, so a killed terminal does not leave a stale "approval" colour behind for
 long. If the LEDs ever get stuck, run `pulsectl.py reset` or delete that directory.
 
@@ -128,12 +167,13 @@ long. If the LEDs ever get stuck, run `pulsectl.py reset` or delete that directo
 
 | Hook event | Matcher | State |
 |---|---|---|
-| `SessionStart` | | waiting |
+| `SessionStart` | | open, or review if the project's hint says so |
 | `UserPromptSubmit` | | busy |
 | `PostToolUse` | | busy (returns from approval / question) |
-| `PreToolUse` | `AskUserQuestion` | waiting |
-| `Notification` | `permission_prompt` | approval |
-| `Stop` | | waiting |
+| `PreToolUse` | `AskUserQuestion` | review |
+| `PermissionRequest` | | approval (fires as the dialog opens) |
+| `Notification` | `permission_prompt` | approval (fallback) |
+| `Stop` | | review if the project's hint says so, else `on_stop` (default open) |
 | `SessionEnd` | | removes the session |
 
 ## Layout
@@ -143,7 +183,8 @@ long. If the LEDs ever get stuck, run `pulsectl.py reset` or delete that directo
 .claude-plugin/marketplace.json lets you `claude plugin marketplace add <this dir>`
 hooks/hooks.json                event -> scripts/pulse.py
 scripts/pulse.py                the hook handler
-scripts/pulsectl.py             manual control: set / reset / revert / status / scan
+scripts/pulsectl.py             manual control: set / reset / revert / status / scan / stage
+skills/pulse-stage/SKILL.md     tells the agent how and when to leave a stage hint
 tests/test_pulse.py             dry-run tests
 docs/setup.md                   driver install walkthrough
 vendor/                         (gitignored) clone of monsgeek-akko-linux

@@ -105,7 +105,7 @@ claude plugin install monsgeek-claude-pulse@monsgeek-claude-pulse
 ```
 
 Then send a prompt and watch the keyboard change, trigger a permission prompt for the approval
-colour, and let Claude finish for the waiting colour.
+colour, and let Claude finish for the subtle open colour.
 
 ## 6. Pick your colours
 
@@ -115,7 +115,7 @@ Set the lighting you like using the keyboard's Fn keys or `iot_driver tui`, then
 python3 scripts/pulsectl.py scan --save busy
 ```
 
-Repeat for `approval`, `waiting` and `idle`. See the README for the config format and the
+Repeat for `approval`, `review`, `open` and `idle`. See the README for the config format and the
 `restore_previous` option, which puts back whatever the keyboard showed before the first session.
 
 ## Notes

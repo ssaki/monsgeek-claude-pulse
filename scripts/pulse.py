@@ -5,11 +5,17 @@ Reads the hook payload (JSON) from stdin, records this session's state,
 computes the most urgent state across all live Claude Code sessions, and
 applies it to the keyboard only when it actually changed.
 
-States, from most to least urgent:
-  approval  Claude is waiting for a permission decision   -> breathing orange
-  waiting   Claude asked a question or finished its turn  -> solid yellow
+States, by what they ask of you, most urgent first:
+  approval  blocking permission prompt                    -> breathing orange
+  review    a stage concluded, progress needs your input  -> solid orange
   busy      Claude is working                             -> rainbow
+  open      a session is live, Claude is done, nothing    -> dim blue
+            pending: the subtle "you were doing something"
   idle      no live sessions                              -> your normal lighting
+
+"review" comes from a stage hint the agent leaves for the project (see
+pulsectl.py stage and the pulse-stage skill), or from AskUserQuestion.
+A missing or stale hint means "open". Nothing here ever throws on it.
 
 Unless "restore_previous" is false in the config, the lighting found on the
 keyboard when the first session takes over is snapshotted and put back when the
@@ -23,13 +29,14 @@ If no hidraw node is found, falls back to `iot_driver set-led`.
 Environment:
   PULSE_DRY_RUN=1   print what would be sent instead of touching the keyboard
   PULSE_LOG=1       append a trace to $STATE_DIR/pulse.log
-  PULSE_CONFIG      path to a JSON file overriding states / iot_driver
+  PULSE_CONFIG      path to a JSON file overriding states / options
   PULSE_STATE_DIR   override the state directory (used by tests)
 
 Never blocks Claude: every failure is swallowed and exit code is 0.
 """
 import fcntl
 import glob
+import hashlib
 import json
 import os
 import shutil
@@ -42,22 +49,29 @@ import time
 # colour-cycle / rainbow-gradient flag (its look depends on the mode).
 DEFAULT_STATES = {
     "approval": ["breathing", 4, 3, 255, 110, 0],
-    "waiting":  ["constant", 4, 0, 255, 200, 0],
+    "review":   ["constant", 4, 0, 255, 120, 0],
     "busy":     ["rainbow", 4, 3],
+    "open":     ["constant", 2, 0, 0, 120, 255],
     "idle":     ["wave", 4, 2],
 }
-PRIORITY = {"approval": 3, "waiting": 2, "busy": 1}
-STALE_SECONDS = 12 * 3600  # drop session files this old even if the pid check passes
+STATE_ALIASES = {"waiting": "review"}  # pre-0.2 config key
+PRIORITY = {"approval": 4, "review": 3, "busy": 2, "open": 1}
+STALE_SECONDS = 12 * 3600        # drop session files this old even if the pid check passes
+STAGE_STALE_SECONDS = 24 * 3600  # a forgotten "review" hint stops nagging after this
+STAGE_FILE = ".pulse-stage"      # optional per-project override, first line: review|open [note]
 
 EVENT_STATE = {
-    "SessionStart": "waiting",
+    "SessionStart": "stage",      # open, or review if the project's stage hint says so
     "UserPromptSubmit": "busy",
     "PostToolUse": "busy",
-    "Stop": "waiting",
+    "Stop": "stage",              # same, with config "on_stop" as the default
     "Notification": "approval",   # hooks.json only routes permission_prompt here
     "PermissionRequest": "approval",
     "SessionEnd": None,           # removes the session
 }
+# What a finished turn looks like when no stage hint says "review".
+ON_STOP_CHOICES = ("open", "review", "idle")
+ON_STOP = "open"
 
 LED_MODES = [
     "off", "constant", "breathing", "neon", "wave", "ripple", "raindrop", "snake",
@@ -88,21 +102,29 @@ def log(d, msg):
             f.write(f"{time.strftime('%H:%M:%S')} {msg}\n")
 
 
+def config_path():
+    return os.environ.get("PULSE_CONFIG") or os.path.expanduser(
+        "~/.config/monsgeek-claude-pulse/config.json")
+
+
 def load_config():
-    """-> (states, iot_driver path or None, restore_previous flag)"""
+    """-> (states, iot_driver path or None, restore_previous flag)
+    Also applies the "on_stop" choice to the module-level ON_STOP."""
+    global ON_STOP
     states = dict(DEFAULT_STATES)
     driver = None
     restore = True
-    path = os.environ.get("PULSE_CONFIG") or os.path.expanduser(
-        "~/.config/monsgeek-claude-pulse/config.json")
     try:
-        with open(path) as f:
+        with open(config_path()) as f:
             cfg = json.load(f)
         for k, v in cfg.get("states", {}).items():
+            k = STATE_ALIASES.get(k, k)
             if k in states and isinstance(v, list):
                 states[k] = v
         driver = cfg.get("iot_driver")
         restore = bool(cfg.get("restore_previous", True))
+        if cfg.get("on_stop") in ON_STOP_CHOICES:
+            ON_STOP = cfg["on_stop"]
     except (OSError, ValueError):
         pass
     return states, driver, restore
@@ -123,6 +145,8 @@ def parse_spec(spec):
     b, s, r, g, bl = nums[:5]
     return int(mode), min(b, 4), min(s, 4), r & 255, g & 255, bl & 255, dazzle
 
+
+# ---------------------------------------------------------------- keyboard
 
 def find_hidraw():
     """The keyboard's vendor-config interface: VID 0x3151, usage page 0xFFFF."""
@@ -187,6 +211,8 @@ def read_led(node):
     raise RuntimeError("keyboard did not answer GET_LEDPARAM")
 
 
+# ---------------------------------------------------------------- snapshot
+
 def snapshot_path(d):
     return os.path.join(d, SNAPSHOT)
 
@@ -215,6 +241,69 @@ def pop_snapshot(d):
         return None
 
 
+# ---------------------------------------------------------------- stage hint
+
+def project_root(cwd):
+    """Git top level of cwd, else cwd itself: the key a stage hint is filed under."""
+    try:
+        out = subprocess.run(["git", "-C", cwd, "rev-parse", "--show-toplevel"],
+                             capture_output=True, text=True, timeout=2)
+        if out.returncode == 0 and out.stdout.strip():
+            return out.stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return os.path.abspath(cwd)
+
+
+def stage_path(d, root):
+    return os.path.join(d, "stage-" + hashlib.sha1(root.encode()).hexdigest()[:12] + ".json")
+
+
+def read_stage(d, cwd):
+    """-> {"stage", "note", "root", "t", "source"} or None. Never raises."""
+    root = project_root(cwd)
+    dotfile = os.path.join(root, STAGE_FILE)
+    try:
+        with open(dotfile) as f:
+            word, _, note = f.readline().strip().partition(" ")
+        if word.lower() in ("review", "open"):
+            return {"stage": word.lower(), "note": note.strip(), "root": root,
+                    "t": os.path.getmtime(dotfile), "source": dotfile}
+    except OSError:
+        pass
+    try:
+        with open(stage_path(d, root)) as f:
+            rec = json.load(f)
+        if rec.get("stage") in ("review", "open"):
+            rec.setdefault("root", root)
+            rec["source"] = "pulsectl"
+            return rec
+    except (OSError, ValueError):
+        pass
+    return None
+
+
+def write_stage(d, root, stage, note=""):
+    path = stage_path(d, root)
+    if stage == "clear":
+        try:
+            os.remove(path)
+        except FileNotFoundError:
+            pass
+        return
+    with open(path, "w") as f:
+        json.dump({"stage": stage, "note": note, "root": root, "t": time.time()}, f)
+
+
+def stage_state(d, cwd, default):
+    rec = read_stage(d, cwd)
+    if rec and rec["stage"] == "review" and time.time() - rec.get("t", 0) < STAGE_STALE_SECONDS:
+        return "review"
+    return default
+
+
+# ---------------------------------------------------------------- sessions
+
 def claude_pid():
     """Walk up the process tree to the Claude Code process that spawned us."""
     pid = os.getppid()
@@ -240,13 +329,15 @@ def pid_alive(pid):
     return os.path.exists(f"/proc/{pid}")
 
 
-def event_to_state(payload):
+def event_to_state(payload, d):
     event = payload.get("hook_event_name", "")
     if event == "PreToolUse":
-        return "waiting" if payload.get("tool_name") == "AskUserQuestion" else "busy"
-    if event not in EVENT_STATE:
-        return "ignore"
-    return EVENT_STATE[event]
+        return "review" if payload.get("tool_name") == "AskUserQuestion" else "busy"
+    state = EVENT_STATE.get(event, "ignore")
+    if state == "stage":
+        default = ON_STOP if event == "Stop" else "open"
+        return stage_state(d, payload.get("cwd") or os.getcwd(), default)
+    return state
 
 
 def write_session(d, session, state):
@@ -325,10 +416,10 @@ def main():
     payload = json.loads(raw) if raw.strip() else {}
     d = state_dir()
     session = str(payload.get("session_id") or "nosession").replace("/", "_")
-    state = event_to_state(payload)
+    states, driver, restore = load_config()  # before event_to_state: may set ON_STOP
+    state = event_to_state(payload, d)
     if state == "ignore":
         return
-    states, driver, restore = load_config()
     with open(os.path.join(d, ".lock"), "w") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         write_session(d, session, state)
