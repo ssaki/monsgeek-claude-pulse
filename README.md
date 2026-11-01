@@ -113,6 +113,8 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/pulsectl.py" stage open "plan approved, i
 python3 "${CLAUDE_PLUGIN_ROOT}/scripts/pulsectl.py" stage clear
 ```
 
+(On Windows, `python` instead of `python3`.)
+
 While a project's hint says `review`, every finished turn and every new session on that project
 shows the review colour. It is keyed by the project's git root, stored in the plugin's state
 directory, and expires after a day so a forgotten hint does not nag forever. Projects without a
@@ -193,7 +195,7 @@ scripts/pulsectl.py             manual control: set / reset / revert / status / 
 skills/pulse-stage/SKILL.md     tells the agent how and when to leave a stage hint
 tests/test_pulse.py             dry-run tests
 docs/setup.md                   Linux driver install walkthrough
-docs/windows.md                 Windows notes and verification checklist
+docs/windows.md                 Windows notes and troubleshooting
 vendor/                         (gitignored) clone of monsgeek-akko-linux
 ```
 

@@ -6,8 +6,8 @@ Linux: finds the keyboard's vendor-config HID collection (vendor 0x3151, usage p
 on the wire are identical to the Linux path. No driver and no admin rights are
 needed: Windows only protects the keyboard and mouse collections, not vendor ones.
 
-Standard library only. Written on Linux without a Windows machine; see
-docs/windows.md for the verification checklist.
+Standard library only. Verified on Windows 11 with a MonsGeek M1 V5 HE; see
+docs/windows.md for troubleshooting.
 
 Run directly to probe:   python pulse_windows.py
 """

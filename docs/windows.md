@@ -35,42 +35,28 @@ IDE extension on the host, you are on the host and this applies to you.
 
 `PULSE_CONFIG`, `PULSE_STATE_DIR`, `PULSE_DRY_RUN` and `PULSE_LOG` work the same.
 
-## Status and verification checklist
+## Troubleshooting
 
-The Windows backend was written on Linux on 31 Oct 2026 without a Windows machine. The Linux
-tests exercise its code paths through a stand-in, and the module compiles, but the calls into
-`setupapi.dll` and `hid.dll` have not run against a real keyboard yet. Work through this list on
-the first Windows machine; each step tells you where to look if it fails. Remove this section once
-everything passes.
+Verified on 31 Oct 2026: Windows 11, Python 3.14, the native `claude.exe`, MonsGeek M1 V5 HE
+(`3151:5030`). The vendor collection shows up as interface `mi_02`, usage page `ffff`, usage `02`,
+with a 65-byte feature report, and the keyboard answers `GET_LEDPARAM` on the first try.
 
-1. **Probe.** `python scripts/pulse_windows.py` should print one line per HID collection of
-   vendor `3151`, mark the one with `usage_page=ffff` with `->`, and end with
-   `keyboard answers: ['constant', 2, 0, 0, 255, 0, 'dazzle']` or whatever the lighting is.
-   - No collections listed: the keyboard is not wired, or the path prefilter missed it. The probe
-     then prints every HID path it saw; look for `vid_3151` in them.
-   - Collections listed but none marked: compare `usage_page` values; the vendor collection may
-     report a different page on this firmware. Adjust `VENDOR_USAGE_PAGE` in `pulse_windows.py`.
-   - `feature_len` is not 65: `set_feature` and `get_feature` pad or trim to it automatically,
-     but note the value.
-   - `HidD_SetFeature` or `HidD_GetFeature` fails with an access error: another program
-     (the MonsGeek desktop driver, a browser tab on the MonsGeek web app) may have opened the
-     collection exclusively. Close it and retry.
-   - A `ctypes` `ArgumentError` or crash: a structure or prototype is wrong. The suspects are
-     `SP_DEVICE_INTERFACE_DETAIL_DATA_W.cbSize` (8 on 64-bit Python) and `HIDP_CAPS` (64 bytes).
-2. **Write.** `python scripts/pulsectl.py set approval` should make the keyboard breathe orange,
-   `python scripts/pulsectl.py revert` should put the previous lighting back.
-3. **Tests.** `python tests/test_pulse.py -v`: all pass. Failures here point at path handling
-   (`os.path`, `git rev-parse` in Git Bash versus cmd) rather than HID.
-4. **Hooks.** `PULSE_LOG=1 claude --plugin-dir .` in Git Bash, type a prompt, let it finish, exit.
-   `%LOCALAPPDATA%\monsgeek-claude-pulse\pulse.log` should show `UserPromptSubmit ... -> busy`,
-   `Stop ... -> open`, `SessionEnd`. The `pid=` in a session file should be the `claude.exe` or
-   `node.exe` process; `pulsectl.py status` says `alive` or `DEAD`.
-   - Hook never runs: check `claude --debug` for the command Git Bash received, and that `python`
-     resolves inside Git Bash (`command -v python`).
-   - `pid=None`: the process tree walk did not find `claude.exe` or `node.exe` within eight
-     parents. Sessions then rely on the 12 h staleness only. Print `process_table()` to see the
-     chain.
-5. **Stage hint.** `python scripts/pulsectl.py stage review "test"` in a project, then a prompt:
-   the Stop hook shows solid orange. `stage clear` afterwards.
-
-Then bump the version in `.claude-plugin/plugin.json`, drop this checklist, and tag.
+- **`pulse_windows.py` lists no collections.** The keyboard is not wired, or it is not vendor
+  `3151`. The probe then prints every HID path it saw; look for `vid_3151` in them.
+- **Collections listed but none marked `->`.** The vendor collection reports a different usage
+  page on this firmware. Compare the `usage_page` column and adjust `VENDOR_USAGE_PAGE`.
+- **`HidD_SetFeature` or `HidD_GetFeature` fails with an access error.** Another program (the
+  MonsGeek desktop driver, a browser tab on the MonsGeek web app) has the collection open
+  exclusively. Close it and retry.
+- **Hook never runs.** `claude --debug` shows the command Git Bash received; check that `python`
+  resolves inside Git Bash (`command -v python`). `PULSE_LOG=1 claude --plugin-dir .` then writes
+  one line per event to `%LOCALAPPDATA%\monsgeek-claude-pulse\pulse.log`, including the Claude
+  Code pid it found.
+- **`pid=None` in the log.** The process tree walk did not reach `claude.exe` or `node.exe` within
+  eight parents. Sessions then expire by the 12 h staleness rule only. This happens when the hook
+  is launched through an extra forking shell layer (a pipeline, a wrapper script), because a
+  Git Bash process that forks and execs leaves a dead parent pid in the Windows chain. Claude
+  Code's own hook launch does not do this.
+- **Stage hint ignored.** Hints are keyed by `git rev-parse --show-toplevel` of the hook's `cwd`.
+  That only matches `pulsectl.py stage` if both see a Windows path (`C:\...`); an MSYS path
+  (`/c/...`) handed to a native `git.exe` fails and falls back to a different key.

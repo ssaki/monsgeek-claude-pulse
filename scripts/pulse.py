@@ -399,10 +399,12 @@ def write_session(d, session, state):
         except FileNotFoundError:
             pass
         return
+    pid = claude_pid()
     tmp = path + ".tmp"
     with open(tmp, "w") as f:
-        json.dump({"state": state, "pid": claude_pid(), "t": time.time()}, f)
+        json.dump({"state": state, "pid": pid, "t": time.time()}, f)
     os.replace(tmp, path)
+    return pid
 
 
 def global_state(d):
@@ -480,13 +482,13 @@ def main():
         else:
             fcntl.flock(lock, fcntl.LOCK_EX)
         try:
-            write_session(d, session, state)
+            pid = write_session(d, session, state)
             g = global_state(d)
             changed = apply(d, g, states, driver, restore)
         finally:
             if WINDOWS:
                 msvcrt.locking(lock.fileno(), msvcrt.LK_UNLCK, 1)
-    log(d, f"{payload.get('hook_event_name')} session={session[:8]} -> {state} global={g} applied={changed}")
+    log(d, f"{payload.get('hook_event_name')} session={session[:8]} pid={pid} -> {state} global={g} applied={changed}")
 
 
 if __name__ == "__main__":

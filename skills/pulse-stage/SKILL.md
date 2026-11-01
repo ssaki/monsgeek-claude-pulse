@@ -26,7 +26,8 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/pulsectl.py" stage            # show the 
 ```
 
 If `CLAUDE_PLUGIN_ROOT` is not set in your shell, the plugin directory is the one shown by
-`claude plugin list` for monsgeek-claude-pulse.
+`claude plugin list` for monsgeek-claude-pulse. On Windows use `python` instead of `python3`
+if the latter is missing or is the Microsoft Store stub.
 
 ## When to set `review`
 

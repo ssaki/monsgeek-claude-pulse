@@ -1,6 +1,6 @@
 {
   "name": "monsgeek-claude-pulse",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Shows Claude Code's state on a MonsGeek/Akko keyboard's RGB: rainbow while busy, pulsing orange when approval is needed, solid yellow when Claude is waiting on you.",
   "author": { "name": "Alexander Marinov" },
   "license": "MIT",
