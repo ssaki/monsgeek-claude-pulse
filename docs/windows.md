@@ -35,6 +35,39 @@ IDE extension on the host, you are on the host and this applies to you.
 
 `PULSE_CONFIG`, `PULSE_STATE_DIR`, `PULSE_DRY_RUN` and `PULSE_LOG` work the same.
 
+## Restore the lighting at logon
+
+If Windows restarts while a Claude session is live, the keyboard keeps the plugin's colour until
+the next session ends. A shortcut in your Startup folder runs `pulsectl.py reset` at every logon
+and puts the snapshot, or the saved `idle` state, back. No administrator rights are needed, unlike
+a Task Scheduler logon task.
+
+First store the lighting you want back as `idle` (the snapshot in `%LOCALAPPDATA%` is used when
+present, this is the fallback):
+
+```bash
+python scripts/pulsectl.py revert           # if a snapshot is held, show that lighting first
+python scripts/pulsectl.py scan --save idle # store what the keyboard shows now
+```
+
+Then create the shortcut, in PowerShell from the repository root. `pythonw.exe` runs without a
+console window:
+
+```powershell
+$py  = (Get-Command pythonw.exe).Source
+$lnk = Join-Path ([Environment]::GetFolderPath("Startup")) "monsgeek-claude-pulse reset.lnk"
+$s   = (New-Object -ComObject WScript.Shell).CreateShortcut($lnk)
+$s.TargetPath       = $py
+$s.Arguments        = "`"$PWD\scripts\pulsectl.py`" reset"
+$s.WorkingDirectory = "$PWD"
+$s.Description      = "Put the keyboard lighting back after a restart"
+$s.Save()
+```
+
+Check it with `explorer shell:startup`, and test it by double-clicking the shortcut. Delete the
+shortcut to remove it. If you prefer Task Scheduler, the equivalent is an "At log on" task for your
+user running the same command, which needs an elevated prompt to create.
+
 ## Troubleshooting
 
 Verified on 31 Oct 2026: Windows 11, Python 3.14, the native `claude.exe`, MonsGeek M1 V5 HE

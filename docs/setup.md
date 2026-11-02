@@ -120,6 +120,45 @@ python3 scripts/pulsectl.py scan --save busy
 Repeat for `approval`, `review`, `open` and `idle`. See the README for the config format and the
 `restore_previous` option, which puts back whatever the keyboard showed before the first session.
 
+## 7. Restore the lighting at login
+
+If the machine restarts while a Claude session is live, the keyboard keeps the plugin's colour
+until the next session ends: hooks only run inside a session, and the snapshot of your previous
+lighting lives under `$XDG_RUNTIME_DIR`, which a reboot clears. Two steps make the lighting come
+back by itself.
+
+Store the lighting you want back as the `idle` state. Put the keyboard on it (its own keys, or
+`pulsectl.py revert` while a snapshot is held), then:
+
+```bash
+python3 scripts/pulsectl.py scan --save idle
+```
+
+Then run `reset` at login with a systemd user unit. It drops sessions whose processes are gone
+and applies the saved `idle`:
+
+```bash
+mkdir -p ~/.config/systemd/user
+cat > ~/.config/systemd/user/monsgeek-claude-pulse-reset.service <<EOF2
+[Unit]
+Description=monsgeek-claude-pulse: put the keyboard lighting back after a restart
+After=graphical-session.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 $PWD/scripts/pulsectl.py reset
+
+[Install]
+WantedBy=default.target
+EOF2
+systemctl --user daemon-reload
+systemctl --user enable --now monsgeek-claude-pulse-reset.service
+systemctl --user status monsgeek-claude-pulse-reset.service   # should show "active (exited)"
+```
+
+The unit needs the udev rule from step 3, as any run of the plugin does. Disable it with
+`systemctl --user disable --now monsgeek-claude-pulse-reset.service`.
+
 ## Notes
 
 - The LED setting is stored on the keyboard, so whatever state was last applied persists after

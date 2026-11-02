@@ -154,6 +154,29 @@ A shell alias keeps it short:
 alias pulsectl="python3 $PWD/scripts/pulsectl.py"
 ```
 
+## Lighting after a restart
+
+Hooks only run inside a Claude Code session, and the keyboard keeps the last command it was given
+in its own flash. So if the machine restarts while a session is live, the plugin's colour is still
+on the keys at the next logon, until the next session ends or you run `pulsectl.py reset`. Two
+things make that automatic.
+
+**1. Dump your default lighting into the config.** Put the keyboard on the lighting you want back
+(its own keys, or `pulsectl.py revert` if a snapshot is held) and store it as the `idle` state:
+
+```bash
+python3 scripts/pulsectl.py scan --save idle
+```
+
+That spec is applied whenever no snapshot exists, which is the case after a Linux reboot (the
+runtime directory holding the snapshot is cleared). On Windows the snapshot survives reboots and
+takes precedence, so the saved `idle` is the fallback.
+
+**2. Run `reset` at logon.** It forgets any sessions whose processes are gone and applies the
+snapshot or the saved `idle`. How to register it is in [docs/setup.md](docs/setup.md#7-restore-the-lighting-at-login)
+for Linux (a systemd user unit) and [docs/windows.md](docs/windows.md#restore-the-lighting-at-logon)
+for Windows (a shortcut in the Startup folder; no administrator rights).
+
 ## Debugging
 
 ```bash
